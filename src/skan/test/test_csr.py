@@ -1,15 +1,33 @@
 from collections import defaultdict
 from itertools import product
 
-import pytest
+from typing import Any
+
 import numpy as np
+import numpy.typing as npt
 from numpy.testing import assert_equal, assert_almost_equal
+import pandas as pd
+import pytest
 from skimage.draw import line
 
 from skan import csr, summarize
 from skan._testdata import (
-        tinycycle, tinyline, skeleton0, skeleton1, skeleton2, skeleton3d,
-        topograph1d, skeleton4, skeletonlabel
+        tinycycle,
+        tinyline,
+        skeleton0,
+        skeleton1,
+        skeleton2,
+        skeleton3d,
+        topograph1d,
+        skeleton4,
+        skeletonlabel,
+        skeleton_loop1,
+        skeleton_loop2,
+        skeleton_linear1,
+        skeleton_linear2,
+        skeleton_linear3,
+        nx_graph,
+        nx_graph_edges,
         )
 
 
@@ -79,7 +97,7 @@ def test_summarize_spacing():
 
 def test_line():
     g, idxs = csr.skeleton_to_csgraph(tinyline)
-    assert_equal(np.ravel(idxs), [1, 2, 3])
+    assert_equal(np.ravel(idxs), [0, 0, 0, 1, 2, 3])
     assert_equal(g.shape, (3, 3))
     # source, dest, length, type
     assert_equal(_old_branch_statistics(tinyline), [[0, 2, 2, 0]])
@@ -212,7 +230,7 @@ def test_prune_paths(
         ) -> None:
     """Test pruning of paths."""
     s = csr.Skeleton(skeleton, keep_images=True)
-    summary = summarize(s, separator='_')
+    summary = csr.summarize(s, separator='_')
     indices_to_remove = summary.loc[summary['branch_type'] == prune_branch
                                     ].index
     pruned = s.prune_paths(indices_to_remove)
@@ -223,7 +241,7 @@ def test_prune_paths_exception_single_point() -> None:
     """Test exceptions raised when pruning leaves a single point and Skeleton object
     can not be created and returned."""
     s = csr.Skeleton(skeleton0)
-    summary = summarize(s, separator='_')
+    summary = csr.summarize(s, separator='_')
     indices_to_remove = summary.loc[summary['branch_type'] == 1].index
     with pytest.raises(ValueError):
         s.prune_paths(indices_to_remove)
@@ -233,7 +251,7 @@ def test_prune_paths_exception_invalid_path_index() -> None:
     """Test exceptions raised when trying to prune paths that do not exist in the summary. This can arise if skeletons
     are not updated correctly during iterative pruning."""
     s = csr.Skeleton(skeleton0)
-    summary = summarize(s, separator='_')
+    summary = csr.summarize(s, separator='_')
     indices_to_remove = [6]
     with pytest.raises(ValueError):
         s.prune_paths(indices_to_remove)
@@ -317,6 +335,12 @@ def test_skeleton_path_image_no_keep_image():
     assert np.max(pli) == s.n_paths
 
 
+def test_skeletonlabel():
+    stats = csr.summarize(csr.Skeleton(skeletonlabel))
+    assert stats['mean-pixel-value'].max() == skeletonlabel.max()
+    assert stats['mean-pixel-value'].max() > 1
+
+
 @pytest.mark.parametrize(
         'dtype', [
                 ''.join([pre, 'int', suf])
@@ -336,3 +360,198 @@ def test_default_summarize_separator():
                       match='separator in column name'):
         stats = csr.summarize(csr.Skeleton(skeletonlabel))
     assert 'skeleton-id' in stats
+
+
+def test_skeletonlabel():
+    stats = csr.summarize(csr.Skeleton(skeletonlabel))
+    assert stats['mean-pixel-value'].max() == skeletonlabel.max()
+    assert stats['mean-pixel-value'].max() > 1
+
+
+@pytest.mark.parametrize(
+        ("np_skeleton", "summary", "nodes", "edges"),
+        [
+                pytest.param(
+                        tinycycle, None, 1, 1, id="tinycircle (no summary)"
+                        ),
+                pytest.param(tinyline, None, 2, 1, id="tinyline (no summary)"),
+                pytest.param(
+                        skeleton0,
+                        csr.summarize(csr.Skeleton(skeleton0), separator="_"),
+                        6,
+                        3,
+                        id="skeleton0 (with summary)"
+                        ),
+                pytest.param(
+                        skeleton1, None, 8, 4, id="skeleton1 (no summary)"
+                        ),
+                pytest.param(
+                        skeleton1,
+                        csr.summarize(csr.Skeleton(skeleton1)),
+                        8,
+                        4,
+                        id="skeleton1 (with summary)"
+                        ),
+                pytest.param(
+                        skeleton2,
+                        csr.summarize(csr.Skeleton(skeleton2)),
+                        16,
+                        8,
+                        id="skeleton2 (with summary)"
+                        ),
+                # (skeleton3d, None, 7, 7, id="skeleton3d (no summary)"),
+                pytest.param(
+                        skeleton_loop1,
+                        None,
+                        20,
+                        10,
+                        id="skeleton_loop1 (no summary)"
+                        ),
+                pytest.param(
+                        skeleton_loop2,
+                        None,
+                        20,
+                        10,
+                        id="skeleton_loop2 (no summary)"
+                        ),
+                pytest.param(
+                        skeleton_linear1,
+                        None,
+                        48,
+                        24,
+                        id="skeleton_linear1 (no summary)"
+                        ),
+                pytest.param(
+                        skeleton_linear2,
+                        None,
+                        6,
+                        3,
+                        id="skeleton_linear2 (no summary)"
+                        ),
+                pytest.param(
+                        skeleton_linear3,
+                        None,
+                        34,
+                        17,
+                        id="skeleton_linear3 (no summary)"
+                        ),
+                ],
+        )
+def test_skeleton_to_nx(
+        np_skeleton: npt.NDArray, summary: pd.DataFrame | None, edges: int,
+        nodes: int
+        ) -> None:
+    """Test creation of NetworkX Graph from skeletons arrays and summary."""
+    skeleton = csr.Skeleton(np_skeleton)
+    skan_nx = csr.skeleton_to_nx(skeleton, summary)
+    assert skan_nx.number_of_nodes() == nodes
+    assert skan_nx.number_of_edges() == edges
+
+
+@pytest.mark.parametrize(
+        ('np_skeleton', 'summary', 'nodes', 'edges'),
+        [
+                pytest.param(
+                        tinycycle,
+                        csr.summarize(csr.Skeleton(tinycycle)),
+                        1,
+                        1,
+                        id="tinycircle"
+                        ),
+                pytest.param(
+                        tinyline,
+                        csr.summarize(csr.Skeleton(tinyline)),
+                        2,
+                        1,
+                        id="tinyline"
+                        ),
+                pytest.param(
+                        skeleton0,
+                        csr.summarize(csr.Skeleton(skeleton0)),
+                        4,
+                        3,
+                        id="skeleton0"
+                        ),
+                pytest.param(
+                        skeleton1,
+                        csr.summarize(csr.Skeleton(skeleton1)),
+                        4,
+                        3,
+                        id="skeleton1"
+                        ),
+                pytest.param(
+                        skeleton_loop1,
+                        csr.summarize(csr.Skeleton(skeleton_loop1)),
+                        10,
+                        10,
+                        id="skeleton_loop1"
+                        ),
+                pytest.param(
+                        skeleton_loop2,
+                        csr.summarize(csr.Skeleton(skeleton_loop2)),
+                        10,
+                        10,
+                        id="skeleton_loop2"
+                        ),
+                pytest.param(
+                        skeleton_linear1,
+                        csr.summarize(csr.Skeleton(skeleton_linear1)),
+                        24,
+                        23,
+                        id="skeleton_lienar1"
+                        ),
+                pytest.param(
+                        skeleton_linear2,
+                        csr.summarize(csr.Skeleton(skeleton_linear2)),
+                        4,
+                        3,
+                        id="skeleton_linear2"
+                        ),
+                pytest.param(
+                        skeleton_linear3,
+                        csr.summarize(csr.Skeleton(skeleton_linear3)),
+                        20,
+                        17,
+                        id="skeleton_linear3"
+                        ),
+                ],
+        )
+def test_nx_to_skeleton(
+        np_skeleton: npt.NDArray, summary: pd.DataFrame | None, edges: int,
+        nodes: int
+        ) -> None:
+    """Test creation of Skeleton from NetworkX Graph."""
+    skeleton = csr.Skeleton(np_skeleton)
+    skan_nx = csr.skeleton_to_nx(skeleton, summary)
+    skeleton_nx = csr.nx_to_skeleton(skan_nx, np_skeleton.shape)
+    np.testing.assert_array_equal(np_skeleton, skeleton_nx.skeleton_image)
+
+
+@pytest.mark.parametrize(("wrong_skeleton", "shape", "error"), [
+        pytest.param(skeleton0, [2, 2], TypeError, id="Numpy Array."),
+        pytest.param(
+                csr.Skeleton(skeleton0), [2, 2], TypeError, id="Skeleton."
+                ),
+        pytest.param(
+                nx_graph, [2, 2],
+                ValueError,
+                id="NetworkX Graph without edges."
+                ),
+        pytest.param(
+                nx_graph_edges, [2, 2],
+                IndexError,
+                id="NetworkX Graph with edge points outside of original image."
+                ),
+        pytest.param(
+                csr.skeleton_to_nx(csr.Skeleton(np.asarray([0, 1, 1, 1, 0]))),
+                [1, 5],
+                IndexError,
+                id="One-dimensional array."
+                )
+        ])
+def test_nx_to_skeleton_attribute_error(
+        wrong_skeleton: Any, shape: list, error: Any
+        ) -> None:
+    """Test various errors are raised by nx_to_skeleton()."""
+    with pytest.raises(error):
+        csr.nx_to_skeleton(wrong_skeleton, shape)
