@@ -13,7 +13,7 @@ from skimage.util._map_array import map_array, ArrayMap
 import numpy.typing as npt
 import numba
 import warnings
-from typing import Tuple, Callable
+from typing import Tuple, Callable, Iterator
 from .nputil import _raveled_offsets_and_distances
 from .summary_utils import find_main_branches
 
@@ -1434,46 +1434,62 @@ def _remove_simple_path_nodes(g):
 def iteratively_prune_paths(
         skeleton: nx.Graph,
         *,
-        discard: Callable[[nx.Graph, tuple(int, int, int)], bool],
-        ) -> nx.Graph:
-    """Iteratively prune a skeleton leaving the specified number of paths.
+        discard: Callable[[nx.Graph, tuple[int, int, int]], bool],
+        ) -> Iterator[Skeleton]:
+    """Iteratively prune edges from a skeleton until none should be discarded.
 
-    Will repeatedly remove branches of type 1 and 3 until there are none left on the Skeleton.
+    Edges (paths/branches) are removed one at a time: on each step we find the
+    first edge for which ``discard`` returns True, remove it, then merge any
+    resulting degree-2 nodes back into their neighbours before re-evaluating
+    ``discard`` against the *updated* graph. Removing edges one at a time
+    (rather than in batches) is important for correctness: it prevents
+    ``discard`` clauses that depend on the global topology from interacting
+    badly. For example, for a loop with a single spur sticking out of it, a
+    batch removal would simultaneously delete both the spur (an endpoint
+    branch) and the loop (a self-loop that is not yet the *only* edge),
+    destroying the whole skeleton; removing the spur first lets the predicate
+    see that the loop is now the sole remaining edge and should be kept.
+
+    Common branch types a ``discard`` predicate might key off of:
 
           0 endpoint-to-endpoint (isolated branch)
           1 junction-to-endpoint
-          2 juntciont-to-junction
+          2 junction-to-junction
           3 isolated cycle
 
     Parameters
     ----------
-    skeleton: np.ndarray | Skeleton
-        Skeleton object to be pruned, may be a binary Numpy array or a Skeleton.
-    discard : Callable[[nx.Graph, tuple(int, int, int)], bool]
+    skeleton : nx.MultiGraph
+        Skeleton to be pruned, as produced by `skeleton_to_nx`. Note: this
+        graph is modified in place as pruning proceeds.
+    discard : Callable[[nx.Graph, tuple[int, int, int]], bool]
         A predicate that is True if the edge should be discarded. The input is
         a graph and an edge, including the multigraph edge key (from which all
         the edge's attributes can be obtained, if needed).
 
-    Returns
-    -------
-    nx.Graph
-        Returns a networkx Graph with the given edges pruned and remaining
-        paths merged.
+    Yields
+    ------
+    Skeleton
+        The pruned skeleton after each individual edge removal, ending with the
+        final skeleton once no remaining edge satisfies ``discard``. Consume the
+        whole iterator (e.g. with ``list(...)``) and take the last element to
+        get the fully pruned result; the intermediate skeletons are useful for
+        visualising the pruning process.
     """
     pruned = skeleton  # we start with no pruning
 
-    num_pruned = 1
-
-    while num_pruned > 0:
-        for_pruning = []
+    pruning = True
+    while pruning:
+        pruning = False
         for e in pruned.edges(keys=True):
             if discard(pruned, e):
-                for_pruning.append(e)
-        num_pruned = len(for_pruning)
-        pruned.remove_edges_from(for_pruning)
-        _remove_simple_path_nodes(pruned)
+                # Remove a single edge, then re-simplify and re-scan from
+                # scratch so that ``discard`` always sees an up-to-date graph.
+                pruned.remove_edge(*e)
+                _remove_simple_path_nodes(pruned)
+                pruning = True
+                break
         yield nx_to_skeleton(pruned)
-    # return pruned
 
 
 def n_unique_neighbors(mg: nx.MultiGraph, n: int):
