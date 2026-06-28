@@ -101,7 +101,7 @@ from skan.csr import skeleton_to_nx  # TODO: update to just skan
 nxskel = skeleton_to_nx(skeleton, skeleton_summary)
 ```
 
-Now, we can use the iteratively_prune_paths function. This function takes in the graph, and a *discard* predicate, a function that takes as input the graph and an edge ID, and returns True if that edge should be removed. To create a useful predicate, it's good to know what attributes an edge has, which we can do by inspecting an arbitrary edge in our graph. Note the keywords `data=True`, which returns the full data on each edge, and `keys=True`, which returns, in addition to the edge source and target, a *key* for each edge, which distinguishes edges when there are multiple edges between two nodes.
+Now, we can use the iteratively_prune_paths function. This function takes in the graph, and a *priority* function, a function that takes as input the graph and an edge ID, and returns the *priority* with which that edge should be removed: a positive number if the edge may be removed (larger meaning "remove sooner"), and 0 if the edge should be kept. On each step, the single highest-priority edge is removed, so that decisions about one edge can take into account edges that have already been pruned. Note the keywords `data=True`, which returns the full data on each edge, and `keys=True`, which returns, in addition to the edge source and target, a *key* for each edge, which distinguishes edges when there are multiple edges between two nodes.
 
 ```{code-cell} ipython3
 next(iter(nxskel.edges(keys=True, data=True)))
@@ -125,11 +125,13 @@ from skan import iteratively_prune_paths
 help(iteratively_prune_paths)
 ```
 
-So we need to write a function that will identify the edges that we don't want in the graph. To repeat our previous conditions:
+So we need to write a function that assigns a removal priority to the edges that we don't want in the graph, and 0 to the ones we want to keep. To repeat our previous conditions:
 
 - edge branches — one of the endpoints' degrees should be 1.
 - self-loops *other* than the final self-loop, which of course we want to keep! 😅
 - the "dimmer" edge of a multi-edge pair.
+
+The order matters: consider a loop with a single branch sticking out of it. The branch is an endpoint *and* the loop is a (non-final) self-loop, so both are candidates for removal. If we removed them together we'd destroy the whole skeleton, so we give the branch a higher priority than the self-loop. Then the branch is removed first, the loop becomes the only edge, its priority drops to 0, and it is kept.
 
 Let's try:
 
@@ -138,18 +140,20 @@ def unwanted(mg, e):
     u, v, k = e
     # first the easy one: the branch is an endpoint
     if mg.degree(u) == 1 or mg.degree(v) == 1:
-        return True
+        return 3
     # next, self-loops, other than the final self-loop
     if u == v and len(mg.edges()) > 1:
-        return True
+        return 2
     # finally, the dimmer of two of the same edge.
     # We'll use a helper function, 'get_multiedge', that returns
     # a sibling multiedge if it exists and None otherwise
     if (e2 := get_multiedge(mg, e)) is not None:
         # if there is a multiedge, we discard current edge if it's
         # dimmer (lower mean pixel value) than its sibling edge
-        return mg.edges[e]['mean_pixel_value'] < mg.edges[e2]['mean_pixel_value']
-    return False
+        if mg.edges[e]['mean_pixel_value'] < mg.edges[e2]['mean_pixel_value']:
+            return 1
+    # anything else should be kept
+    return 0
 
 
 def get_multiedge(mg, e):
@@ -161,7 +165,7 @@ def get_multiedge(mg, e):
 ```
 
 ```{code-cell} ipython3
-skeletons_pruned_iteratively = list(iteratively_prune_paths(nxskel, discard=unwanted))
+skeletons_pruned_iteratively = list(iteratively_prune_paths(nxskel, priority=unwanted))
 ```
 
 ```{code-cell} ipython3
