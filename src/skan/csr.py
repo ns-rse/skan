@@ -1421,6 +1421,10 @@ def _remove_simple_path_nodes(g):
     """Remove any nodes of degree 2 by merging their incident edges."""
     to_remove = [n for n in g.nodes if g.degree(n) == 2]
     for u in to_remove:
+        # merging edges removes nodes, so a node queued for removal may already
+        # be gone (or no longer simple) by the time we reach it; skip those.
+        if u not in g or g.degree(u) != 2:
+            continue
         if n_unique_neighbors(g, u) == 2:  # actually a simple node
             v, w = g[u].keys()
             kuv = _get_edge_key(g, u, v)
@@ -1431,26 +1435,59 @@ def _remove_simple_path_nodes(g):
             _merge_edges(g, (u, v, kuv0), (u, v, kuv1))
 
 
+def spur_length_inv(g: nx.Graph, e: tuple[int, int, int]) -> float:
+    """Priority function flagging short spurs (junction-to-endpoint branches).
+
+    This is the default priority used by `iteratively_prune_paths`: it removes
+    spurs -- branches with exactly one endpoint of degree 1 (a tip) and one of
+    higher degree (a junction) -- and leaves every other branch (including
+    isolated endpoint-to-endpoint lines and cycles) untouched. It uses the
+    inverse of the spur length as a priority to remove short spurs first.
+
+    Parameters
+    ----------
+    g : nx.Graph
+        The (multi)graph being pruned.
+    e : tuple[int, int, int]
+        A multigraph edge ``(u, v, key)``.
+
+    Returns
+    -------
+    float
+        0.0 if the branch is not as spur,
+        ``1/g[e[0], e[1]]['branch_distance']`` otherwise.
+    """
+    u, v, _ = e
+    if (g.degree(u) == 1) ^ (g.degree(v) == 1):
+        return 1 / g[u][v]['branch_distance']
+    return 0.0
+
+
 def iteratively_prune_paths(
-        skeleton: nx.Graph,
+        skeleton: nx.Graph | Skeleton | npt.NDArray,
         *,
-        discard: Callable[[nx.Graph, tuple[int, int, int]], bool],
+        priority: Callable[[nx.Graph, tuple[int, int, int]], float] = spur_length_inv,
         ) -> Iterator[Skeleton]:
-    """Iteratively prune edges from a skeleton until none should be discarded.
+    """Iteratively prune edges from a skeleton by descending priority.
 
-    Edges (paths/branches) are removed one at a time: on each step we find the
-    first edge for which ``discard`` returns True, remove it, then merge any
-    resulting degree-2 nodes back into their neighbours before re-evaluating
-    ``discard`` against the *updated* graph. Removing edges one at a time
-    (rather than in batches) is important for correctness: it prevents
-    ``discard`` clauses that depend on the global topology from interacting
-    badly. For example, for a loop with a single spur sticking out of it, a
-    batch removal would simultaneously delete both the spur (an endpoint
-    branch) and the loop (a self-loop that is not yet the *only* edge),
-    destroying the whole skeleton; removing the spur first lets the predicate
-    see that the loop is now the sole remaining edge and should be kept.
+    Edges (paths/branches) are removed one at a time: on each step ``priority``
+    is evaluated for every edge and the single highest-priority edge is
+    removed, after which any resulting degree-2 nodes are merged back into
+    their neighbours before ``priority`` is re-evaluated against the *updated*
+    graph. Pruning stops once no edge has a positive priority.
 
-    Common branch types a ``discard`` predicate might key off of:
+    Removing the single highest-priority edge each step (rather than every
+    flagged edge in a batch) is important for correctness: it prevents
+    ``priority`` clauses that depend on the global topology from interacting
+    badly, and it makes the result independent of edge iteration order. For
+    example, for a loop with a single spur sticking out of it, a batch removal
+    would simultaneously delete both the spur (an endpoint branch) and the loop
+    (a self-loop that is not yet the *only* edge), destroying the whole
+    skeleton. By giving the spur a higher priority than the loop, the spur is
+    removed first; the loop is then the sole remaining edge, its priority drops
+    to zero, and it is correctly kept.
+
+    Common branch types a ``priority`` function might key off of:
 
           0 endpoint-to-endpoint (isolated branch)
           1 junction-to-endpoint
@@ -1459,36 +1496,52 @@ def iteratively_prune_paths(
 
     Parameters
     ----------
-    skeleton : nx.MultiGraph
-        Skeleton to be pruned, as produced by `skeleton_to_nx`. Note: this
-        graph is modified in place as pruning proceeds.
-    discard : Callable[[nx.Graph, tuple[int, int, int]], bool]
-        A predicate that is True if the edge should be discarded. The input is
-        a graph and an edge, including the multigraph edge key (from which all
-        the edge's attributes can be obtained, if needed).
+    skeleton : nx.MultiGraph or Skeleton or array
+        Skeleton to be pruned. This may be an `nx.MultiGraph` as produced by
+        `skeleton_to_nx`, a `Skeleton` object, or a skeleton image array; the
+        latter two are converted to a graph internally. Note: when a graph is
+        passed, it is modified in place as pruning proceeds.
+    priority : Callable[[nx.Graph, tuple[int, int, int]], float]
+        A function returning the removal priority of an edge. The input is a
+        graph and an edge, including the multigraph edge key (from which all
+        the edge's attributes can be obtained, if needed). Return a positive
+        value for edges that may be removed -- the largest value is removed
+        first -- and zero (or a negative value) for edges that should be kept.
+        The default, `spur_length_inv`, removes junction-to-endpoint branches and
+        leaves everything else in place.
 
     Yields
     ------
     Skeleton
         The pruned skeleton after each individual edge removal, ending with the
-        final skeleton once no remaining edge satisfies ``discard``. Consume the
-        whole iterator (e.g. with ``list(...)``) and take the last element to
-        get the fully pruned result; the intermediate skeletons are useful for
-        visualising the pruning process.
+        final skeleton once no remaining edge has a positive priority. Consume
+        the whole iterator (e.g. with ``list(...)``) and take the last element
+        to get the fully pruned result; the intermediate skeletons are useful
+        for visualising the pruning process.
     """
-    pruned = skeleton  # we start with no pruning
+    if isinstance(skeleton, nx.Graph):
+        pruned = skeleton  # we start with no pruning
+    else:
+        if not isinstance(skeleton, Skeleton):
+            skeleton = Skeleton(skeleton)
+        pruned = skeleton_to_nx(skeleton)
 
     pruning = True
     while pruning:
         pruning = False
+        best_edge = None
+        best_priority = 0
         for e in pruned.edges(keys=True):
-            if discard(pruned, e):
-                # Remove a single edge, then re-simplify and re-scan from
-                # scratch so that ``discard`` always sees an up-to-date graph.
-                pruned.remove_edge(*e)
-                _remove_simple_path_nodes(pruned)
-                pruning = True
-                break
+            p = priority(pruned, e)
+            if p > best_priority:
+                best_priority = p
+                best_edge = e
+        if best_edge is not None:
+            # Remove the single highest-priority edge, then re-simplify and
+            # re-scan so that ``priority`` always sees an up-to-date graph.
+            pruned.remove_edge(*best_edge)
+            _remove_simple_path_nodes(pruned)
+            pruning = True
         yield nx_to_skeleton(pruned)
 
 

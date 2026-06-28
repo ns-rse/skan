@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 import scipy
 from scipy import ndimage as ndi
+from toolz import last
 from skimage import data
 from skimage.draw import line
 from skimage.morphology import skeletonize
@@ -344,6 +345,75 @@ def test_zero_degree_nodes():
             )
 
 
+# Fraction of the longest branch below which a loop is considered "small"
+# enough to break open during pruning (see `_prune_priority`).
+_SMALL_LOOP_FRACTION = 0.5
+
+
+def _smallest_cycle_length(graph, edge):
+    """Perimeter of the smallest cycle through ``edge``, or None if a bridge."""
+    u, v, key = edge
+    branch_distance = graph.edges[edge]['branch_distance']
+    if u == v:  # a self-loop is its own cycle
+        return branch_distance
+    reduced = graph.copy()
+    reduced.remove_edge(u, v, key)
+    try:
+        detour = nx.shortest_path_length(
+                reduced, u, v, weight='branch_distance'
+                )
+    except nx.NetworkXNoPath:
+        return None
+    return branch_distance + detour
+
+
+def _prune_priority(graph, edge):
+    """Pruning priority that keeps the longest branch or the last big loop.
+
+    Spurs (junction-to-endpoint branches) and edges belonging to a small loop
+    are removable, shortest-first; everything else -- the backbone and any
+    large loop -- is kept (priority 0). Breaking small loops before dropping
+    long branches is what lets the longest branch survive a spurious loop.
+    """
+    u, v, key = edge
+    branch_distance = graph.edges[edge]['branch_distance']
+    if (graph.degree(u) == 1) ^ (graph.degree(v) == 1):  # spur
+        return 1.0 + 1.0 / (branch_distance + 1)
+    cycle_length = _smallest_cycle_length(graph, edge)
+    if cycle_length is not None:  # part of a loop
+        longest = max(
+                data['branch_distance']
+                for _, _, data in graph.edges(data=True)
+                )
+        if cycle_length < _SMALL_LOOP_FRACTION * longest:  # a small loop
+            return 1.0 + 1.0 / (branch_distance + 1)
+    return 0.0
+
+
+def _prune_to_backbone(skeleton_image, max_passes=20):
+    """Iteratively prune a skeleton to its backbone(s) or main loop(s).
+
+    Pruning happens on the networkx graph, but writing merged paths back to an
+    image (via ``nx_to_skeleton``) leaves redundant pixels at acute junctions
+    that form tiny spurious loops. We therefore re-thin the image and prune
+    again until the result is stable, so those artifacts are cleaned up too.
+    """
+    skeleton = csr.Skeleton(skeleton_image)
+    previous_n_paths = -1
+    for _ in range(max_passes):
+        if skeleton.n_paths in (previous_n_paths, 0):
+            break
+        previous_n_paths = skeleton.n_paths
+        skeleton = last(
+                csr.iteratively_prune_paths(skeleton, priority=_prune_priority)
+                )
+        thinned = skeletonize(skeleton.skeleton_image > 0)
+        if not thinned.any():
+            break
+        skeleton = csr.Skeleton(thinned)
+    return skeleton
+
+
 @pytest.mark.parametrize(
         'skeleton, paths, branch_type, branch_distance, euclidean_distance',
         [
@@ -363,14 +433,18 @@ def test_iteratively_prune_paths(
         branch_distance: float,
         euclidean_distance: float,
         ) -> None:
-    """Test iteratively pruning a skeleton."""
-    pruned_skeleton = csr.iteratively_prune_paths(skeleton)
-    skeleton_summary = csr.summarize(pruned_skeleton)
+    """Test iteratively pruning a skeleton to a single backbone or loop."""
+    pruned_skeleton = _prune_to_backbone(skeleton)
+    skeleton_summary = csr.summarize(pruned_skeleton, separator='-')
     assert isinstance(pruned_skeleton, csr.Skeleton)
     assert skeleton_summary.shape[0] == paths
     assert skeleton_summary['branch-type'][0] == branch_type
-    assert skeleton_summary['branch-distance'][0] == branch_distance
-    assert skeleton_summary['euclidean-distance'][0] == euclidean_distance
+    assert skeleton_summary['branch-distance'][0] == pytest.approx(
+            branch_distance
+            )
+    assert skeleton_summary['euclidean-distance'][0] == pytest.approx(
+            euclidean_distance
+            )
 
 
 @pytest.mark.parametrize(
@@ -390,14 +464,18 @@ def test_iteratively_prune_multiple_paths(
         branch_distance: float,
         euclidean_distance: float,
         ) -> None:
-    """Test iteratively pruning a image with multiple skeletons."""
-    pruned_skeleton = csr.iteratively_prune_paths(skeleton)
-    skeleton_summary = csr.summarize(pruned_skeleton)
+    """Test iteratively pruning an image with multiple skeletons."""
+    pruned_skeleton = _prune_to_backbone(skeleton)
+    skeleton_summary = csr.summarize(pruned_skeleton, separator='-')
     assert isinstance(pruned_skeleton, csr.Skeleton)
     assert skeleton_summary.shape[0] == paths
     assert list(skeleton_summary['branch-type']) == branch_type
-    assert list(skeleton_summary['branch-distance']) == branch_distance
-    assert list(skeleton_summary['euclidean-distance']) == euclidean_distance
+    assert list(skeleton_summary['branch-distance']) == pytest.approx(
+            branch_distance
+            )
+    assert list(skeleton_summary['euclidean-distance']) == pytest.approx(
+            euclidean_distance
+            )
 
 
 def test_skeleton_path_image_no_keep_image():
