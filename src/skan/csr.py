@@ -1435,7 +1435,7 @@ def _remove_simple_path_nodes(g):
             _merge_edges(g, (u, v, kuv0), (u, v, kuv1))
 
 
-def spur_length_inv(g: nx.Graph, e: tuple[int, int, int]) -> float:
+def spur_length(g: nx.Graph, e: tuple[int, int, int]) -> float:
     """Priority function flagging short spurs (junction-to-endpoint branches).
 
     This is the default priority used by `iteratively_prune_paths`: it removes
@@ -1466,7 +1466,7 @@ def spur_length_inv(g: nx.Graph, e: tuple[int, int, int]) -> float:
 def iteratively_prune_paths(
         skeleton: nx.Graph | Skeleton | npt.NDArray,
         *,
-        priority: Callable[[nx.Graph, tuple[int, int, int]], float] = spur_length_inv,
+        priority: Callable[[nx.Graph, tuple[int, int, int]], float] = spur_length,
         ) -> Iterator[Skeleton]:
     """Iteratively prune edges from a skeleton by descending priority.
 
@@ -1507,7 +1507,7 @@ def iteratively_prune_paths(
         the edge's attributes can be obtained, if needed). Return a positive
         value for edges that may be removed -- the largest value is removed
         first -- and zero (or a negative value) for edges that should be kept.
-        The default, `spur_length_inv`, removes junction-to-endpoint branches and
+        The default, `spur_length`, removes junction-to-endpoint branches and
         leaves everything else in place.
 
     Yields
