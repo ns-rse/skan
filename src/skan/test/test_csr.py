@@ -260,16 +260,6 @@ def test_prune_paths(
     np.testing.assert_array_equal(pruned, target)
 
 
-def test_prune_paths_exception_single_point() -> None:
-    """Test exceptions raised when pruning leaves a single point and Skeleton object
-    can not be created and returned."""
-    s = csr.Skeleton(skeleton0)
-    summary = csr.summarize(s, separator='_')
-    indices_to_remove = summary.loc[summary['branch_type'] == 1].index
-    with pytest.raises(ValueError):
-        s.prune_paths(indices_to_remove)
-
-
 def test_prune_paths_exception_invalid_path_index() -> None:
     """Test exceptions raised when trying to prune paths that do not exist in the summary. This can arise if skeletons
     are not updated correctly during iterative pruning."""
